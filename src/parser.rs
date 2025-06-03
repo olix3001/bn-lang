@@ -1,0 +1,315 @@
+use std::cell::RefCell;
+
+use chumsky::{Parser, extra, input::ValueInput, prelude::*};
+
+use crate::{
+    ast::{self, Ast, BinaryOp, ImportGroupItem, ImportTreeKind, NodeId, NodeKind, UnaryOp},
+    error::RichParseError,
+    lexer::{Loc, SourceId, Token},
+};
+
+impl chumsky::span::Span for Loc {
+    type Context = SourceId;
+    type Offset = usize;
+
+    fn new(context: Self::Context, range: std::ops::Range<Self::Offset>) -> Self {
+        Loc::new(context, range)
+    }
+
+    fn context(&self) -> Self::Context {
+        self.source
+    }
+    fn start(&self) -> Self::Offset {
+        self.span.start
+    }
+    fn end(&self) -> Self::Offset {
+        self.span.end
+    }
+}
+
+// Context used for building the flat AST during parsing.
+pub struct AstContext {
+    pub ast: RefCell<Ast>,
+    source_id: SourceId,
+}
+
+impl AstContext {
+    pub fn new(source_id: SourceId) -> Self {
+        Self {
+            ast: RefCell::new(Ast::new(source_id)),
+            source_id,
+        }
+    }
+
+    pub fn add_node(&self, kind: NodeKind, loc: Loc) -> NodeId {
+        self.ast.borrow_mut().add_node(kind, loc)
+    }
+
+    pub fn to_loc(&self, span: SimpleSpan) -> Loc {
+        Loc::new(self.source_id, span.into_range())
+    }
+}
+
+type ParserContext<'a> = &'a AstContext;
+type ParserExtra<'a> = extra::Err<RichParseError<'a>>;
+
+macro_rules! parser_functions {
+    ($(
+        $vis:vis fn $name:ident($cx:ident $(,$arg:ident: $typ:ty)*) -> $out:ty => $code:tt
+    )+) => {
+        $(
+            $vis fn $name<'src, I>($cx: ParserContext<'src> $(, $arg: $typ)*)
+                -> impl Parser<'src, I, $out, ParserExtra<'src>> + Clone
+                    where I: ValueInput<'src, Token = Token, Span = Loc>, $code
+        )*
+    };
+}
+
+// ---< HELPER PARSERS >---
+parser_functions! {
+    fn ident_parser(cx) -> NodeId => {
+        select! { Token::Identifier(ident) => NodeKind::Identifier(ident) }
+            .map_with(|tok, e| cx.add_node(tok, e.span()))
+            .labelled("identifier")
+    }
+
+    fn attribute_parser(cx, module_level: bool) -> Vec<ast::Attribute> => {
+        let path = path_parser(cx);
+        let nl = just(Token::NL).or_not().ignored();
+        let raw_token = none_of(Token::RightParen).map_with(|tok: Token, e| (tok, e.span()));
+
+        let beginning = match module_level {
+            true => just(Token::Hash).ignore_then(just(Token::Bang)).boxed(),
+            false => just(Token::Hash).boxed()
+        };
+        let single_attribute = beginning
+            .ignore_then(just(Token::LeftBracket))
+            .ignore_then(path)
+            .then(raw_token.repeated().collect().delimited_by(just(Token::LeftParen), just(Token::RightParen)).or_not())
+            .map_with(|(path, args_opt), e| ast::Attribute { path, args_raw_tokens: args_opt, loc: e.span() })
+            .then_ignore(just(Token::RightBracket))
+            .labelled("attribute");
+
+        single_attribute.then_ignore(nl).repeated().collect().boxed()
+    }
+
+    fn path_parser(cx) -> Vec<NodeId> => {
+        ident_parser(cx)
+            .separated_by(just(Token::DoubleColon))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .labelled("path")
+            .boxed()
+    }
+}
+
+// ---< MAIN PARSERS >---
+parser_functions! {
+    pub fn statement_parser(cx) -> NodeId => {
+        just(Token::NL).repeated().ignore_then(
+            choice((
+                import_parser(cx),
+                const_decl_parser(cx),
+                let_decl_parser(cx),
+
+                expr_parser(cx).map_with(|node, e| cx.add_node(NodeKind::ExprStmt(node), e.span()))
+            )).then_ignore(just(Token::NL).or(just(Token::Semicolon)).or_not())
+        )
+    }
+
+    pub fn expr_parser(cx) -> NodeId => {
+        use chumsky::pratt::{prefix, infix, postfix, left};
+
+        let atom = just(Token::NL).repeated().ignore_then(
+            choice((
+                literal_expr_parser(cx),
+            )).then_ignore(just(Token::NL).or_not())
+        ).map_with(|atom, e| (atom, e.span()));
+
+        // Fold with left-associativity
+        fn la_fold(cx: ParserContext, op: BinaryOp, l: (NodeId, Loc), r: (NodeId, Loc)) -> (NodeId, Loc) {
+            let new_span = Loc::new(cx.source_id, l.1.span.start..r.1.span.end);
+            (cx.add_node(
+                NodeKind::BinaryOp { op, left: l.0, right: r.0 },
+                new_span.clone()
+            ), new_span)
+        }
+
+        // Fold with unary prefix.
+        fn unary_fold(cx: ParserContext, op: UnaryOp, operand: (NodeId, Loc)) -> (NodeId, Loc) {
+            (cx.add_node(
+                NodeKind::UnaryOp { op, operand: operand.0 },
+                operand.1.clone()
+            ), operand.1)
+        }
+
+        let pratt_expr = atom.boxed().pratt((
+            postfix(8, just(Token::Increment), |lhs, _, _| unary_fold(cx, UnaryOp::PostInc, lhs)),
+            postfix(8, just(Token::Decrement), |lhs, _, _| unary_fold(cx, UnaryOp::PostDec, lhs)),
+
+            prefix(7, just(Token::Increment), |_, rhs, _| unary_fold(cx, UnaryOp::PreInc, rhs)),
+            prefix(7, just(Token::Decrement), |_, rhs, _| unary_fold(cx, UnaryOp::PreDec, rhs)),
+            prefix(7, just(Token::Bang), |_, rhs, _| unary_fold(cx, UnaryOp::Not, rhs)),
+            prefix(7, just(Token::Minus), |_, rhs, _| unary_fold(cx, UnaryOp::Neg, rhs)),
+
+            infix(left(6), just(Token::Star), |l, _, r, _| la_fold(cx, BinaryOp::Mul, l, r)),
+            infix(left(6), just(Token::Slash), |l, _, r, _| la_fold(cx, BinaryOp::Div, l, r)),
+
+            infix(left(5), just(Token::Percent), |l, _, r, _| la_fold(cx, BinaryOp::Mod, l, r)),
+
+            infix(left(4), just(Token::Plus), |l, _, r, _| la_fold(cx, BinaryOp::Add, l, r)),
+            infix(left(4), just(Token::Minus), |l, _, r, _| la_fold(cx, BinaryOp::Sub, l, r)),
+
+            infix(left(3), just(Token::LessEqual), |l, _, r, _| la_fold(cx, BinaryOp::LessEq, l, r)),
+            infix(left(3), just(Token::GreaterEqual), |l, _, r, _| la_fold(cx, BinaryOp::GreaterEq, l, r)),
+            infix(left(3), just(Token::LeftAngle), |l, _, r, _| la_fold(cx, BinaryOp::Less, l, r)),
+            infix(left(3), just(Token::RightAngle), |l, _, r, _| la_fold(cx, BinaryOp::Greater, l, r)),
+
+            infix(left(2), just(Token::AboutEqual), |l, _, r, _| la_fold(cx, BinaryOp::AboutEq, l, r)),
+            infix(left(2), just(Token::EqualEqual), |l, _, r, _| la_fold(cx, BinaryOp::EqEq, l, r)),
+            infix(left(2), just(Token::NotEqual), |l, _, r, _| la_fold(cx, BinaryOp::NotEq, l, r)),
+
+            infix(left(1), just(Token::Conjunction), |l, _, r, _| la_fold(cx, BinaryOp::And, l, r)),
+            infix(left(1), just(Token::Disjunction), |l, _, r, _| la_fold(cx, BinaryOp::Or, l, r)),
+        ));
+
+        pratt_expr.map(|val| val.0).labelled("expression").boxed()
+    }
+
+    pub fn module_parser(cx) -> NodeId => {
+        let mod_attributes = attribute_parser(cx, true).or_not().map(|v| v.unwrap_or(Vec::new()));
+
+        just(Token::NL).repeated().ignore_then(
+            mod_attributes.then(statement_parser(cx).repeated().collect()).map_with(|(attrs, stmts), e| {
+                cx.add_node(NodeKind::Module(ast::Module {
+                    attributes: attrs,
+                    name: None,
+                    stmts,
+                    loc: e.span()
+                }), e.span())
+            })
+        ).then_ignore(just(Token::NL).repeated())
+    }
+
+    // ---< STATEMENTS >---
+    fn const_decl_parser(cx) -> NodeId => {
+        let ident = ident_parser(cx);
+
+        attribute_parser(cx, false)
+            .then_ignore(just(Token::ConstKW))
+            .then(ident)
+            .then_ignore(just(Token::Assign))
+            .then(expr_parser(cx))
+            .map_with(|((attributes, name), value), e| cx.add_node(
+                NodeKind::ConstDecl { attributes, name, value },
+                e.span()
+            )).labelled("const variable declaration").boxed()
+    }
+
+    fn let_decl_parser(cx) -> NodeId => {
+        let ident = ident_parser(cx);
+
+        attribute_parser(cx, false)
+            .then_ignore(just(Token::LetKW))
+            .then(ident)
+            .then(
+                just(Token::Assign)
+                    .ignore_then(expr_parser(cx))
+                    .or_not()
+            )
+            .map_with(|((attributes, name), value), e| cx.add_node(
+                NodeKind::LetDecl { attributes, name, value },
+                e.span()
+            )).labelled("let variable declaration").boxed()
+    }
+
+    fn import_parser(cx) -> NodeId => {
+        let ident = ident_parser(cx);
+        let path = path_parser(cx);
+
+        let mut import_tree_parser = Recursive::declare();
+        let mut group_item_parser = Recursive::declare();
+
+        let renamed_path_item = import_tree_parser.clone()
+            .then_ignore(just(Token::AsKW))
+            .then(ident.clone())
+            .map_with(|(tree, new_name), e| ImportGroupItem::RenamedPath {
+                tree, new_name, loc: e.span()
+            });
+
+        let self_item = just(Token::SelfKW)
+            .map_with(|_, e| ImportGroupItem::SelfImport(e.span()));
+
+        let path_item = import_tree_parser.clone()
+            .map(ImportGroupItem::Path);
+
+        group_item_parser.define(
+            choice((
+                renamed_path_item,
+                self_item,
+                path_item
+            )).labelled("import group item")
+        );
+
+        let group_items = group_item_parser
+            .then_ignore(just(Token::NL).or_not())
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>();
+
+        let group_kind = group_items
+            .delimited_by(just(Token::LeftCurly), just(Token::RightCurly))
+            .map(ImportTreeKind::Group)
+            .labelled("import group");
+
+        import_tree_parser.define(
+            path.then(
+                just(Token::DoubleColon)
+                    .ignore_then(group_kind.clone())
+                    .or_not()
+            ).map_with(|(prefix, opt_group_kind), e| {
+                if let Some(group_kind_val) = opt_group_kind {
+                    ast::ImportTree {
+                        prefix,
+                        kind: group_kind_val,
+                        loc: e.span()
+                    }
+                } else {
+                    ast::ImportTree {
+                        prefix,
+                        kind: ImportTreeKind::Leaf,
+                        loc: e.span()
+                    }
+                }
+            })
+            .labelled("import tree")
+        );
+
+        attribute_parser(cx, false)
+            .then_ignore(just(Token::ImportKW))
+            .then(import_tree_parser)
+            .map_with(|(attributes, tree), e| cx.add_node(
+                NodeKind::ImportDef(
+                    ast::Import {
+                        attributes,
+                        tree,
+                        loc: e.span()
+                    }
+                ), e.span()))
+            .then_ignore(just(Token::Semicolon))
+            .labelled("import statement")
+            .boxed()
+    }
+
+    // ---< EXPRESSIONS >---
+    fn literal_expr_parser(cx) -> NodeId => {
+        let number_literal = select! {
+            Token::NumberLiteral(value) => NodeKind::NumberLit(value)
+        };
+
+        choice((
+            number_literal,
+            path_parser(cx).map(|path| NodeKind::Path { segments: path })
+        )).map_with(|node, e| cx.add_node(node, e.span()))
+    }
+}
