@@ -56,6 +56,11 @@ impl Ast {
             }
         })
     }
+
+    #[allow(dead_code)]
+    pub fn ident_name(&self, id: NodeId) -> String {
+        self.get_ident_name(Some(id)).unwrap().to_owned()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +124,10 @@ pub enum NodeKind {
         stmts: Vec<NodeId>,            // Statements or declarations
         trailing_expr: Option<NodeId>, // If the block ends with an expression for implicit return
     },
+    Export {
+        stmt: NodeId,
+        name: Option<NodeId>,
+    },
     IfExpr {
         cond: NodeId,
         then_branch: NodeId, /* Block or Expr */
@@ -147,11 +156,6 @@ pub enum NodeKind {
         params: Vec<Param>,
         body: NodeId, /* Block or Expr */
         loc: Loc,
-    },
-    JsxElement {
-        name: JsxName,
-        attributes: Vec<JsxAttribute>,
-        children: Vec<NodeId /* JsxChild */>,
     },
 
     // Statements (can also be expressions in some contexts)
@@ -190,15 +194,10 @@ pub enum NodeKind {
     ImportDef(Import),
 
     // Other specific nodes
-    AttributeNode(Attribute), // If attributes themselves need to be nodes, or just stored in Vec<Attribute>
     LabelNode {
         name: NodeId, /* Identifier */
         item: NodeId, /* The item being labelled */
     },
-
-    // For Jsx Children
-    JsxText(String),
-    JsxExpression(NodeId), // {expr}
 
     Error, // Parsing failed here.
 }
@@ -229,25 +228,6 @@ pub struct Param {
     pub default_value: Option<NodeId>, // Expression NodeId for default
     // Type annotation could be added here: pub type_ann: Option<NodeId>,
     pub loc: Loc,
-}
-
-#[derive(Debug, Clone)]
-pub enum JsxName {
-    Identifier(NodeId),             // e.g. <div />
-    Path { segments: Vec<NodeId> }, // e.g. <My.Component /> - list of Identifier NodeIds
-}
-
-#[derive(Debug, Clone)]
-pub struct JsxAttribute {
-    pub name: NodeId, // Identifier NodeId for attribute name
-    pub value: Option<JsxAttrValue>,
-    pub loc: Loc,
-}
-
-#[derive(Debug, Clone)]
-pub enum JsxAttrValue {
-    Literal(NodeId),    // StringLit NodeId
-    Expression(NodeId), // NodeId for expression in {expr}
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +364,12 @@ pub enum BinaryOp {
     // Logical
     And,
     Or,
+    // Binary
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeft,
+    ShiftRight,
     // Assignment
     Assign,
     AddAssign,

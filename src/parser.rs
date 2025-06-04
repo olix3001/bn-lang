@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
 use chumsky::{Parser, extra, input::ValueInput, prelude::*};
 
@@ -28,15 +28,16 @@ impl chumsky::span::Span for Loc {
 }
 
 // Context used for building the flat AST during parsing.
+#[derive(Clone)]
 pub struct AstContext {
-    pub ast: RefCell<Ast>,
+    pub ast: Rc<RefCell<Ast>>,
     source_id: SourceId,
 }
 
 impl AstContext {
     pub fn new(source_id: SourceId) -> Self {
         Self {
-            ast: RefCell::new(Ast::new(source_id)),
+            ast: Rc::new(RefCell::new(Ast::new(source_id))),
             source_id,
         }
     }
@@ -45,6 +46,7 @@ impl AstContext {
         self.ast.borrow_mut().add_node(kind, loc)
     }
 
+    #[allow(dead_code)]
     pub fn to_loc(&self, span: SimpleSpan) -> Loc {
         Loc::new(self.source_id, span.into_range())
     }
@@ -106,15 +108,57 @@ parser_functions! {
 // ---< MAIN PARSERS >---
 parser_functions! {
     pub fn statement_parser(cx) -> NodeId => {
-        just(Token::NL).repeated().ignore_then(
-            choice((
-                import_parser(cx),
-                const_decl_parser(cx),
-                let_decl_parser(cx),
+        let mut statement_parser_rec = Recursive::declare();
+        let ident = ident_parser(cx);
+        let expr = expr_parser(cx);
 
-                expr_parser(cx).map_with(|node, e| cx.add_node(NodeKind::ExprStmt(node), e.span()))
-            )).then_ignore(just(Token::NL).or(just(Token::Semicolon)).or_not())
-        )
+        // ---< THINGS THAT NEED RECURSIVE STATEMENTS >---
+        // Module
+        let mod_attributes_parser = attribute_parser(cx, true).or_not().map(|v| v.unwrap_or(Vec::new()));
+        let module_content_parser = just(Token::NL).repeated().ignore_then(
+            mod_attributes_parser.then(statement_parser_rec.clone().repeated().collect()).map_with(|(attrs, stmts), e| {
+                cx.add_node(NodeKind::Module(ast::Module {
+                    attributes: attrs,
+                    name: None,
+                    stmts,
+                    loc: e.span()
+                }), e.span())
+            })
+        ).then_ignore(just(Token::NL).repeated());
+        let inline_module_parser = just(Token::ModuleKW)
+            .ignore_then(ident)
+            .then(module_content_parser.delimited_by(just(Token::LeftCurly), just(Token::RightCurly)))
+            .map(|(name, module_id)| {
+                let mut ast = cx.ast.borrow_mut();
+                let node_mut = ast.get_node_mut(module_id).unwrap();
+                let NodeKind::Module(module) = &mut node_mut.kind
+                    else { unreachable!("This parser only module!") };
+                module.name = Some(name);
+                module_id
+            }).labelled("inline module declaration").boxed();
+
+        let export_statement_parser = just(Token::ExportKW)
+            .ignore_then(statement_parser_rec.clone())
+            .map_with(|stmt, e| cx.add_node(NodeKind::Export {
+                stmt,
+                name: None // TODO
+            }, e.span())).boxed();
+
+        // ---< STATEMENTS >---
+        statement_parser_rec.define(
+            just(Token::NL).repeated().ignore_then(
+                choice((
+                    import_parser(cx),
+                    inline_module_parser,
+                    export_statement_parser,
+                    const_decl_parser(cx),
+                    let_decl_parser(cx),
+
+                    expr.map_with(|node, e| cx.add_node(NodeKind::ExprStmt(node), e.span())),
+                )).then_ignore(just(Token::NL).or(just(Token::Semicolon)).or_not()).labelled("statement")
+            )
+        );
+        statement_parser_rec
     }
 
     pub fn expr_parser(cx) -> NodeId => {

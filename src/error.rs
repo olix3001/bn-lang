@@ -121,6 +121,7 @@ pub fn report_parser_errors(cache: &AriadneCache, errors: Vec<RichParseError<'_>
     }
 }
 
+#[allow(dead_code)]
 fn label_to_code(label: &str) -> u16 {
     // Simple hash for an error code, replace with actual error codes
     label.chars().map(|c| c as u16).sum::<u16>() % 1000 + 1 // E001-E999
@@ -137,6 +138,10 @@ pub enum CompilerErrorType {
     },
     UndefinedVariable {
         name: String,
+    },
+    InvalidPath {
+        item: String,
+        module: String,
     },
     UndefinedMember {
         object_type: String,
@@ -190,7 +195,7 @@ impl CompilationError {
         self
     }
 
-    pub fn report(&self, cache: &AriadneCache, source_id: SourceId) {
+    pub fn report(&self, cache: &AriadneCache, _source_id: SourceId) {
         let mut colors = ColorGenerator::new();
         let main_color = colors.next();
 
@@ -246,6 +251,9 @@ impl CompilationError {
             }
             CompilerErrorType::UndefinedVariable { name } => {
                 format!("Cannot find variable `{}` in this scope", name)
+            }
+            CompilerErrorType::InvalidPath { item, module } => {
+                format!("No item `{}` on module `{}`", item, module)
             }
             CompilerErrorType::UndefinedMember {
                 object_type,

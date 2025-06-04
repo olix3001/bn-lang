@@ -4,7 +4,7 @@ use logos::{Lexer, Logos};
 
 pub type SourceId = usize;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub struct Loc {
     pub source: SourceId,
     pub span: core::ops::Range<usize>,
@@ -79,6 +79,7 @@ pub enum Token {
     #[token("struct")] StructKW,
     #[token("enum")] EnumKW,
     #[token("import")] ImportKW,
+    #[token("export")] ExportKW,
     #[token("as")] AsKW,
     #[token("yield")] YieldKW,
     #[token("return")] ReturnKW,
@@ -97,6 +98,7 @@ pub enum Token {
     #[token("null")] NullKW,
     #[token("undef")] UndefinedKW,
     #[token("self")] SelfKW,
+    #[token("module")] ModuleKW,
 
     // ==< Value literals >==
     #[regex(r"(?:(?:\d(?:_\d+)*)(?:\.(?:\d(?:_\d+)*)?)?|\.(?:\d(?:_\d+)*))(?:[eE][+-]?\d+)?", allocated_string)] NumberLiteral(String),

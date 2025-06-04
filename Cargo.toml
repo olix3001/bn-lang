@@ -3,10 +3,22 @@ name = "bn-lang"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["target_js"]
+target_js = ["dep:oxc", "dep:oxc_allocator"]
+
 [dependencies]
 ariadne = "0.5.1"
 chumsky = { version = "0.10.1", features = ["pratt"] }
 colored = "3.0.0"
+derive_more = { version = "2.0.1", features = ["deref", "deref_mut"] }
 logos = "0.15.0"
+once_cell = "1.21.3"
 rustc-hash = "2.1.1"
 slotmap = "1.0.7"
+
+# Dependencies for target_js feature.
+oxc = { version = "0.72.2", optional = true, features = ["codegen"] }
+oxc_allocator = { version = "0.72.2", optional = true }
+anyhow = "1.0.98"
+either = "1.15.0"

@@ -1,7 +1,4 @@
-use std::{
-    any::{Any, TypeId},
-    collections::hash_map::Entry,
-};
+use std::any::{Any, TypeId};
 
 use colored::Colorize;
 use rustc_hash::FxHashMap;
@@ -50,6 +47,29 @@ impl ComponentStorage {
         }
         return None;
     }
+
+    #[allow(dead_code)]
+    pub fn fetch_mut<T: 'static>(&mut self, node: NodeId) -> Option<&mut T> {
+        if let Some(cid) = self.id_map.get(&node) {
+            if let Some(component) = self.components.get_mut(&TypeId::of::<T>()) {
+                return component
+                    .get_mut(*cid)
+                    .map(|inner| inner.downcast_mut::<T>())
+                    .flatten();
+            }
+        }
+        return None;
+    }
+
+    #[allow(dead_code)]
+    pub fn has<T: 'static>(&self, node: NodeId) -> bool {
+        if let Some(cid) = self.id_map.get(&node) {
+            if let Some(component) = self.components.get(&TypeId::of::<T>()) {
+                return component.contains_key(*cid);
+            }
+        }
+        return false;
+    }
 }
 
 pub fn pretty_print_ast(ast: &Ast, root: NodeId, ind: usize) {
@@ -77,6 +97,15 @@ pub fn pretty_print_ast(ast: &Ast, root: NodeId, ind: usize) {
                 "import".yellow(),
                 pretty_import_tree(ast, &import.tree)
             )
+        }
+
+        NodeKind::Export { stmt, name } => {
+            println!(
+                "{indent}{} {}:",
+                "export as".yellow(),
+                ast.get_ident_name(*name).unwrap_or("<self>").cyan()
+            );
+            pretty_print_ast(ast, *stmt, ind + 1);
         }
 
         NodeKind::ConstDecl { name, value, .. } => {
