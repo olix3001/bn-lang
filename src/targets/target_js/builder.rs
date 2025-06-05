@@ -348,6 +348,9 @@ impl<'a> JsBuilder<'a> {
                 .alloc_identifier_reference(Span::default(), self.builder.atom(name)),
         )
     }
+    pub fn boolean_literal(&mut self, value: bool) -> Expression<'a> {
+        Expression::BooleanLiteral(self.builder.alloc_boolean_literal(Span::default(), value))
+    }
 
     // Object literal builders
     pub fn start_object_literal(&mut self) -> ObjectLiteralBuilder<'a> {

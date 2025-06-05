@@ -22,6 +22,8 @@ pub struct ItemNamespace(pub NameStack);
 
 #[derive(Debug, Default, Clone, Deref, DerefMut)]
 pub struct ItemName(pub String);
+#[derive(Clone, Deref)]
+pub struct FunctionParams(pub Vec<Param>);
 
 impl<'a> ItemNameBindingPass<'a> {
     pub fn new(component_storage: &'a mut ComponentStorage) -> Self {
@@ -98,6 +100,10 @@ impl<'a> Visitor<NameStack> for ItemNameBindingPass<'a> {
             ast::ItemName::Identifier(name) => self.bind_current_name(ast, *name),
             _ => { /* Functions inside structs and objects are not bound. */ }
         }
+
+        let current_node = self.current_node;
+        self.component_storage
+            .insert(current_node, FunctionParams(func.params.clone()));
 
         walk_function_def(self, ast, func)
     }

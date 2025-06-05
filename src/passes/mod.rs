@@ -150,10 +150,9 @@ where
         ast: &Ast,
         callee: NodeId,
         args: &[Arg],
-        tail_closure: Option<NodeId>,
         _node_loc: Loc,
     ) -> Self::Result {
-        walk_call(self, ast, callee, args, tail_closure)
+        walk_call(self, ast, callee, args)
     }
     fn visit_member_access(
         &mut self,
@@ -417,11 +416,9 @@ pub fn walk_node<V: Visitor<S, Result = R>, S: Default, R: Try>(
             NodeKind::UnaryOp { op, operand } => {
                 visitor.visit_unary_op(ast, *op, *operand, node.loc.clone())
             }
-            NodeKind::Call {
-                callee,
-                args,
-                tail_closure,
-            } => visitor.visit_call(ast, *callee, args, *tail_closure, node.loc.clone()),
+            NodeKind::Call { callee, args } => {
+                visitor.visit_call(ast, *callee, args, node.loc.clone())
+            }
             NodeKind::MemberAccess {
                 object,
                 member,
@@ -577,11 +574,9 @@ pub fn walk_call<V: Visitor<S, Result = R>, S: Default, R: Try>(
     ast: &Ast,
     callee: NodeId,
     args: &[Arg],
-    tail_closure: Option<NodeId>,
 ) -> R {
     let callee = visitor.visit_node(ast, callee);
     visit_vec_items!(visitor, ast, args, visit_arg);
-    visit_opt_node_id!(visitor, ast, tail_closure);
     callee
 }
 

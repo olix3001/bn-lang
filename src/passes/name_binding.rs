@@ -46,6 +46,10 @@ impl MangledName {
             format!("{:x}", hasher.finish()).slice(0..5).unwrap()
         ))
     }
+
+    pub fn raw(name: impl AsRef<str>) -> Self {
+        Self(name.as_ref().to_string())
+    }
 }
 
 pub struct NameBindingPass<'a> {
@@ -210,9 +214,32 @@ impl<'a> Visitor<NameStack> for NameBindingPass<'a> {
     // Actual expressions that are being bound.
     #[rustfmt::skip]
     fn visit_const_decl(&mut self, ast: &Ast, attributes: &[Attribute], name: NodeId, value: NodeId, node_loc: Loc) -> Self::Result {
+        let current_node = self.current_node;
+        if attributes.iter().any(|attrib| ast.ident_name(*attrib.path.last().unwrap()) == "external") {
+            if value.0 != usize::MAX {
+                return Err(CompilationError::new(
+                    CompilerErrorType::InternalCompilerError("#[external] attribute on constant cannot have assigned value".to_string()),
+                    node_loc.clone()
+                ))
+            }
+            let name_str = ast.ident_name(name);
+            self.component_storage.insert(
+                self.current_node,
+                MangledName::raw(name_str),
+            );
+            walk_const_decl(self, ast, attributes, name, value)?;
+            self.peek_stack_mut().insert(ast.ident_name(name), (current_node, None));
+            return self.default_result();
+        }
+        if value.0 == usize::MAX {
+            return Err(CompilationError::new(
+                CompilerErrorType::InternalCompilerError("Constants not marked with #[external] require assigned value".to_string()),
+                node_loc.clone()
+            ))
+        }
+
         self.bind_current_mangled_name(ast, Some(name), &node_loc);
         walk_const_decl(self, ast, attributes, name, value)?;
-        let current_node = self.current_node;
         self.peek_stack_mut().insert(ast.ident_name(name), (current_node, None));
         self.default_result()
     }
@@ -230,11 +257,6 @@ impl<'a> Visitor<NameStack> for NameBindingPass<'a> {
         let ast::ItemName::Identifier(name) = &func.name else {
             todo!()
         };
-        println!(
-            "VISITING FUNCTION {} WITH {} PARAMS",
-            ast.ident_name(*name),
-            func.params.len()
-        );
         self.bind_current_mangled_name(ast, Some(*name), &node_loc);
         let current_node = self.current_node;
         let def_value = walk_function_def(self, ast, func)?;
@@ -252,6 +274,33 @@ impl<'a> Visitor<NameStack> for NameBindingPass<'a> {
         walk_param(self, ast, param)?;
         self.current_node = prev_node;
         self.default_result()
+    }
+
+    fn visit_call(
+        &mut self,
+        ast: &Ast,
+        callee: NodeId,
+        args: &[Arg],
+        _node_loc: Loc,
+    ) -> Self::Result {
+        let current_node = self.current_node;
+        // TODO: Check call arguments.
+        walk_call(self, ast, callee, args)
+    }
+
+    fn visit_member_access(
+        &mut self,
+        ast: &Ast,
+        object: NodeId,
+        member: NodeId,
+        computed: bool,
+        _node_loc: Loc,
+    ) -> Self::Result {
+        if !computed {
+            self.component_storage
+                .insert(self.current_node, MangledName::raw(ast.ident_name(member)));
+        }
+        walk_member_access(self, ast, object, member)
     }
 
     #[rustfmt::skip]

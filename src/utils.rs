@@ -185,11 +185,18 @@ pub fn pretty_print_ast(ast: &Ast, root: NodeId, ind: usize) {
             }
         }
 
+        NodeKind::ExprStmt(expr) => {
+            println!("{indent}{}", pretty_print_expr(ast, *expr));
+        }
+
         _ => println!("{indent}{}", "<unknown statement>".red()),
     }
 }
 
 fn pretty_print_expr(ast: &Ast, expr: NodeId) -> String {
+    if expr.0 == usize::MAX {
+        return format!("{}", "<dummy>".black().on_bright_yellow());
+    }
     let cnode = &ast.nodes[expr.0];
 
     match &cnode.kind {
@@ -211,6 +218,43 @@ fn pretty_print_expr(ast: &Ast, expr: NodeId) -> String {
                 pretty_print_expr(ast, *operand)
             )
         }
+
+        NodeKind::Call { callee, args } => {
+            format!(
+                "{}({})",
+                pretty_print_expr(ast, *callee),
+                args.iter()
+                    .map(|arg| {
+                        match &arg.name {
+                            Some(name) => format!(
+                                "{}: {}",
+                                ast.ident_name(*name).cyan(),
+                                pretty_print_expr(ast, arg.value)
+                            ),
+                            None => pretty_print_expr(ast, arg.value),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+
+        NodeKind::MemberAccess {
+            object,
+            member,
+            computed,
+        } => match computed {
+            true => format!(
+                "{}[{}]",
+                pretty_print_expr(ast, *object),
+                pretty_print_expr(ast, *member)
+            ),
+            false => format!(
+                "{}.{}",
+                pretty_print_expr(ast, *object),
+                ast.ident_name(*member).bright_green()
+            ),
+        },
 
         _ => "<unknown expression>".red().to_string(),
     }

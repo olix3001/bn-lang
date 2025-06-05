@@ -1,6 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use chumsky::{Parser, extra, input::ValueInput, prelude::*};
+use logos::Source;
 
 use crate::{
     ast::{
@@ -110,7 +111,7 @@ parser_functions! {
 
 // ---< MAIN PARSERS >---
 parser_functions! {
-    pub fn statement_parser(cx) -> NodeId => {
+    pub fn statement_parser(cx) -> NodeId => { // TODO: This could take `expr_parse: impl Parser`, which would make this a lot more organised.
         let mut statement_parser_rec = Recursive::declare();
         let ident = ident_parser(cx);
         let expr = expr_parser(cx);
@@ -247,7 +248,7 @@ parser_functions! {
         let ident = ident_parser(cx);
         let mut expr_parser_rec = Recursive::declare();
         let call_arguments_parser = choice((
-            ident.then_ignore(just(Token::Colon)).then(expr_parser_rec.clone()).map_with(|(name, value), e| ast::Arg {
+            ident.clone().then_ignore(just(Token::Colon)).then(expr_parser_rec.clone()).map_with(|(name, value), e| ast::Arg {
                 name: Some(name),
                 value,
                 loc: e.span()
@@ -264,18 +265,7 @@ parser_functions! {
             choice((
                 literal_expr_parser(cx),
             )).then_ignore(just(Token::NL).or_not())
-        );
-
-        // TODO: Fix this shit, so that It supports nested calls like hello()()() (maybe use pratt? or write own right-associative parser)
-        let call_expression_parser = atom
-            .clone()
-            .then(call_arguments_parser.delimited_by(just(Token::LeftParen), just(Token::RightParen)))
-            .map_with(|(callee, args), e| cx.add_node(NodeKind::Call { callee, args, tail_closure: None }, e.span()))
-            .labelled("call expression").boxed();
-
-        let atom = call_expression_parser.or(atom)
-            .then_ignore(just(Token::NL).or_not())
-            .map_with(|atom, e| (atom, e.span()));
+        ).map_with(|atom, e| (atom, e.span()));
 
         // Fold with left-associativity
         fn la_fold(cx: ParserContext, op: BinaryOp, l: (NodeId, Loc), r: (NodeId, Loc)) -> (NodeId, Loc) {
@@ -294,7 +284,35 @@ parser_functions! {
             ), operand.1)
         }
 
+        let call_operator = call_arguments_parser
+            .delimited_by(just(Token::LeftParen), just(Token::RightParen))
+            .boxed();
+
+        let static_member_access = just(Token::Dot).ignore_then(ident);
+        let computed_member_access = expr_parser_rec.clone().delimited_by(just(Token::LeftBracket), just(Token::RightBracket));
+
         let pratt_expr = atom.boxed().pratt((
+            // This seems weird but it is actually a great idea.
+            postfix(10, static_member_access, |lhs: (NodeId, Loc), member, _| {
+                (cx.add_node(
+                    NodeKind::MemberAccess { object: lhs.0, member: member, computed: false },
+                    lhs.1.clone()
+                ), lhs.1)
+            }),
+            postfix(10, computed_member_access, |lhs: (NodeId, Loc), member, _| {
+                (cx.add_node(
+                    NodeKind::MemberAccess { object: lhs.0, member: member, computed: true },
+                    lhs.1.clone()
+                ), lhs.1)
+            }),
+            postfix(10, call_operator, |lhs: (NodeId, Loc), args, _| {
+               (cx.add_node(
+                   NodeKind::Call { callee: lhs.0, args },
+                   lhs.1.clone()
+               ), lhs.1)
+            }),
+
+            // Regular operators.
             postfix(8, just(Token::Increment), |lhs, _, _| unary_fold(cx, UnaryOp::PostInc, lhs)),
             postfix(8, just(Token::Decrement), |lhs, _, _| unary_fold(cx, UnaryOp::PostDec, lhs)),
 
@@ -325,7 +343,10 @@ parser_functions! {
         ));
 
         let final_parser = pratt_expr.map(|val| val.0).labelled("expression").boxed();
-        expr_parser_rec.define(final_parser);
+        expr_parser_rec.define(choice((
+            final_parser.clone().delimited_by(just(Token::LeftParen), just(Token::RightParen)),
+            final_parser
+        )));
         expr_parser_rec
     }
 
@@ -351,10 +372,13 @@ parser_functions! {
         attribute_parser(cx, false)
             .then_ignore(just(Token::ConstKW))
             .then(ident)
-            .then_ignore(just(Token::Assign))
-            .then(expr_parser(cx))
+            .then(
+                just(Token::Assign)
+                    .ignore_then(expr_parser(cx))
+                    .or_not()
+            )
             .map_with(|((attributes, name), value), e| cx.add_node(
-                NodeKind::ConstDecl { attributes, name, value },
+                NodeKind::ConstDecl { attributes, name, value: value.unwrap_or(NodeId(usize::MAX)) },
                 e.span()
             )).labelled("const variable declaration").boxed()
     }
@@ -459,9 +483,22 @@ parser_functions! {
         let number_literal = select! {
             Token::NumberLiteral(value) => NodeKind::NumberLit(value)
         };
+        let string_literal = select! {
+            Token::StringLiteral(value) => NodeKind::StringLit(
+                unescape::unescape(
+                    value.slice(1..value.len()-1).unwrap()
+                ).unwrap().to_string()
+            )
+        };
+        let boolean_literal = select! {
+            Token::TrueKW => NodeKind::BooleanLit(true),
+            Token::FalseKW => NodeKind::BooleanLit(false),
+        };
 
         choice((
             number_literal,
+            string_literal,
+            boolean_literal,
             path_parser(cx).map(|path| NodeKind::Path { segments: path })
         )).map_with(|node, e| cx.add_node(node, e.span()))
     }

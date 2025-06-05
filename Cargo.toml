@@ -22,3 +22,4 @@ oxc = { version = "0.72.2", optional = true, features = ["codegen"] }
 oxc_allocator = { version = "0.72.2", optional = true }
 anyhow = "1.0.98"
 either = "1.15.0"
+unescape = "0.1.0"

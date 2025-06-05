@@ -41,10 +41,12 @@ fn main() {
         return a - b
     }
 
-    const hello = 1
+    const hello = add(1, b: 4);
     let world = 2 - 2 * 2 == 8 || 4 < 5
     let lorem = hello
-    let bruh = sigma::skibidi::custom_value
+    let bruh = sigma::skibidi::custom_value;
+    #[external] const console;
+    console.log(sub(a: lorem, b: bruh));
     ";
 
     let token_iter = Token::lexer(EXAMPLE_SOURCE)

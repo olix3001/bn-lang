@@ -110,7 +110,6 @@ pub enum NodeKind {
     Call {
         callee: NodeId,
         args: Vec<Arg>,
-        tail_closure: Option<NodeId>,
     }, // tail_closure is NodeId of a ClosureExpr
     MemberAccess {
         object: NodeId,

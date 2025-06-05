@@ -6,9 +6,10 @@ use crate::{
     lexer::Loc,
     passes::{
         Visitor,
+        item_name_binding::FunctionParams,
         name_binding::{MangledName, TargetReference},
         walk_block, walk_const_decl, walk_export, walk_function_data, walk_function_def,
-        walk_import_tree, walk_let_decl, walk_node,
+        walk_import_tree, walk_let_decl, walk_member_access, walk_node,
     },
     targets::{
         Target,
@@ -56,6 +57,7 @@ struct JsBackend<'a> {
     main_builder: JsBuilder<'a>,
 
     modules_decl: ObjectLiteralBuilder<'a>,
+    root: Option<String>,
 }
 
 impl<'a> JsBackend<'a> {
@@ -69,6 +71,7 @@ impl<'a> JsBackend<'a> {
             main_builder: JsBuilder::new(),
 
             modules_decl: JsBuilder::new().start_object_literal(),
+            root: None,
         }
     }
 
@@ -87,6 +90,15 @@ impl<'a> JsBackend<'a> {
         let mut full_body = JsBuilder::new();
         // Prepend modules
         full_body.const_decl("__bn_modules", self.modules_decl.finish());
+
+        // Root module reference.
+        {
+            let modules_root_name = self
+                .main_builder
+                .string_literal(&self.root.expect("There should be default module."));
+            self.main_builder
+                .const_decl("__bn_root_module_id__", modules_root_name.into());
+        }
 
         // Insert bn runtime code.
         {
@@ -122,6 +134,7 @@ impl<'a> JsBackend<'a> {
         })
     }
 
+    #[track_caller]
     fn mangled_name(&self, node: NodeId) -> &str {
         self.component_storage
             .fetch::<MangledName>(node)
@@ -194,6 +207,9 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
         self.push_stack(JsScope::default());
         let value = self.visit_module_data(ast, module);
         let mut assembled_module = self.pop_stack().unwrap();
+        if module.name.is_none() {
+            self.root = Some(self.current_mangled_name().to_string());
+        }
 
         {
             // Build function from this module.
@@ -225,6 +241,9 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
         value: NodeId,
         _node_loc: Loc,
     ) -> Self::Result {
+        if value.0 == usize::MAX {
+            return self.default_result();
+        };
         let mangled_name = self.current_mangled_name().to_string();
 
         let ExprOrStmt::Expression(init) = walk_const_decl(self, ast, attributes, name, value)?
@@ -350,6 +369,18 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
         Ok(ExprOrStmt::Expression(number_expr))
     }
 
+    fn visit_string_lit(&mut self, _ast: &Ast, value: &String, _node_loc: Loc) -> Self::Result {
+        let builder = &mut self.peek_stack_mut().builder;
+        let string_expr = builder.string_literal(value);
+        Ok(ExprOrStmt::Expression(string_expr))
+    }
+
+    fn visit_boolean_lit(&mut self, _ast: &Ast, value: bool, _node_loc: Loc) -> Self::Result {
+        let builder = &mut self.peek_stack_mut().builder;
+        let boolean_expr = builder.boolean_literal(value);
+        Ok(ExprOrStmt::Expression(boolean_expr))
+    }
+
     fn visit_export(
         &mut self,
         ast: &Ast,
@@ -403,6 +434,14 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
             },
             expr,
         )))
+    }
+
+    fn visit_expr_stmt(&mut self, ast: &Ast, expr: NodeId, _node_loc: Loc) -> Self::Result {
+        let ExprOrStmt::Expression(expr) = self.visit_node(ast, expr)? else {
+            todo!()
+        };
+        self.peek_stack_mut().builder.expr_stmt(expr);
+        self.default_result()
     }
 
     fn visit_binary_op(
@@ -465,6 +504,104 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
             },
             rhs,
         )))
+    }
+
+    fn visit_call(
+        &mut self,
+        ast: &Ast,
+        callee: NodeId,
+        args: &[ast::Arg],
+        node_loc: Loc,
+    ) -> Self::Result {
+        let callee_references = self.component_storage.fetch::<TargetReference>(callee); // TODO: Check reference in the correct way.
+        let call_order_signature = callee_references
+            .map(|callee_references| {
+                self.component_storage
+                    .fetch::<FunctionParams>(callee_references.node)
+            })
+            .flatten();
+
+        let ExprOrStmt::Expression(callee) = self.visit_node(ast, callee)? else {
+            unreachable!()
+        };
+
+        if let Some(call_order_signature) = call_order_signature {
+            let mut builder = self.peek_stack().builder.clone();
+            let mut named_args = builder.start_object_literal();
+            for (i, arg) in args.iter().enumerate() {
+                let ExprOrStmt::Expression(arg_expr) = self.visit_arg(ast, arg)? else {
+                    unreachable!()
+                };
+                let arg_name = match &arg.name {
+                    Some(name) => {
+                        let param_ref = call_order_signature
+                            .iter()
+                            .find(|param| ast.ident_name(param.name) == ast.ident_name(*name))
+                            .ok_or(CompilationError::new(
+                                CompilerErrorType::UndefinedMember {
+                                    object_type: "function".to_string(),
+                                    member_name: ast.ident_name(*name),
+                                },
+                                node_loc.clone(),
+                            ))?;
+                        self.mangled_name(param_ref.name).to_string()
+                    }
+                    None => self.mangled_name(call_order_signature[i].name).to_string(),
+                };
+
+                named_args.ident_property(arg_name, arg_expr);
+            }
+            let call_expr = builder.call(callee, [named_args.finish()].into_iter(), false);
+
+            Ok(ExprOrStmt::Expression(call_expr))
+        } else {
+            let args = args
+                .iter()
+                .map(|arg| {
+                    let ExprOrStmt::Expression(arg_expr) = self.visit_arg(ast, arg)? else {
+                        unreachable!()
+                    };
+
+                    Ok(arg_expr)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let builder = &mut self.peek_stack_mut().builder;
+            let call_expr = builder.call(callee, args.into_iter(), false);
+
+            Ok(ExprOrStmt::Expression(call_expr))
+        }
+    }
+
+    fn visit_member_access(
+        &mut self,
+        ast: &Ast,
+        object: NodeId,
+        member: NodeId,
+        computed: bool,
+        _node_loc: Loc,
+    ) -> Self::Result {
+        let ExprOrStmt::Expression(object) = self.visit_node(ast, object)? else {
+            unreachable!()
+        };
+
+        match computed {
+            true => {
+                let ExprOrStmt::Expression(member) = self.visit_node(ast, member)? else {
+                    unreachable!()
+                };
+                let builder = &mut self.peek_stack_mut().builder;
+                let member_expr = builder.computed_member(object, member, true);
+                Ok(ExprOrStmt::Expression(member_expr.into()))
+            }
+            false => {
+                let current_node = self.current_node;
+                let member_name = self.mangled_name(current_node).to_string();
+                let builder = &mut self.peek_stack_mut().builder;
+                let member_expr = builder.static_member(object, &member_name, true);
+                Ok(ExprOrStmt::Expression(member_expr.into()))
+            }
+        }
     }
 
     fn visit_path(&mut self, ast: &Ast, segments: &[NodeId], _node_loc: Loc) -> Self::Result {
