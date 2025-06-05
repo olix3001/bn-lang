@@ -3,7 +3,10 @@ use std::{cell::RefCell, rc::Rc};
 use chumsky::{Parser, extra, input::ValueInput, prelude::*};
 
 use crate::{
-    ast::{self, Ast, BinaryOp, ImportGroupItem, ImportTreeKind, NodeId, NodeKind, UnaryOp},
+    ast::{
+        self, Ast, BinaryOp, ImportGroupItem, ImportTreeKind, ItemName, NodeId, NodeKind, Param,
+        UnaryOp,
+    },
     error::RichParseError,
     lexer::{Loc, SourceId, Token},
 };
@@ -126,7 +129,7 @@ parser_functions! {
             })
         ).then_ignore(just(Token::NL).repeated());
         let inline_module_parser = just(Token::ModuleKW)
-            .ignore_then(ident)
+            .ignore_then(ident.clone())
             .then(module_content_parser.delimited_by(just(Token::LeftCurly), just(Token::RightCurly)))
             .map(|(name, module_id)| {
                 let mut ast = cx.ast.borrow_mut();
@@ -144,6 +147,46 @@ parser_functions! {
                 name: None // TODO
             }, e.span())).boxed();
 
+        let attributes_parser = attribute_parser(cx, false);
+
+        let code_block_parser = statement_parser_rec.clone()
+            .repeated().collect::<Vec<_>>()
+            .delimited_by(just(Token::LeftCurly), just(Token::RightCurly))
+            .map(|body| {
+                NodeKind::Block { stmts: body, trailing_expr: None }
+            });
+
+        let function_body_parser = choice((
+            just(Token::FatArrow).ignore_then(expr.clone())
+                .map(|expr| NodeKind::ReturnStmt { attributes: Vec::new(), value: Some(expr) }),
+            code_block_parser.clone()
+        ));
+
+        let function_parser = attributes_parser.clone()
+            .then(func_modifiers_parser(cx))
+            .then_ignore(just(Token::FuncKW))
+            .then(ident.clone())
+            .then(func_params_parser(cx).delimited_by(just(Token::LeftParen), just(Token::RightParen)))
+            .then(function_body_parser.map_with(|body, e| cx.add_node(body, e.span())))
+            .map_with(|((((attributes, modifiers), name), params), body), e| cx.add_node(
+                NodeKind::FunctionDef(ast::Function {
+                    attributes,
+                    name: ItemName::Identifier(name), // Computed names are possible in structs/objects only.
+                    params,
+                    body,
+                    is_async: modifiers.0,
+                    is_generator: modifiers.1,
+                    loc: e.span()
+                }),
+                e.span()
+            )).labelled("function definition").boxed();
+
+        let return_stmt_parser = attributes_parser.clone()
+            .then_ignore(just(Token::ReturnKW))
+            .then(expr.clone().or_not())
+            .map_with(|(attributes, value), e| cx.add_node(NodeKind::ReturnStmt { attributes, value }, e.span()))
+            .labelled("return statement").boxed();
+
         // ---< STATEMENTS >---
         statement_parser_rec.define(
             just(Token::NL).repeated().ignore_then(
@@ -151,24 +194,88 @@ parser_functions! {
                     import_parser(cx),
                     inline_module_parser,
                     export_statement_parser,
+                    function_parser,
                     const_decl_parser(cx),
                     let_decl_parser(cx),
+                    return_stmt_parser,
 
                     expr.map_with(|node, e| cx.add_node(NodeKind::ExprStmt(node), e.span())),
-                )).then_ignore(just(Token::NL).or(just(Token::Semicolon)).or_not()).labelled("statement")
+                )).then_ignore(just(Token::NL).or(just(Token::Semicolon)).repeated()).labelled("statement")
             )
         );
         statement_parser_rec
     }
 
+    pub fn func_modifiers_parser(cx) -> (bool, bool) => {
+        just(Token::AsyncKW).or(just(Token::GenKW)).or_not()
+            .map(|tok| match tok {
+                Some(Token::AsyncKW) => (true, false),
+                Some(Token::GenKW) => (false, true),
+                None => (false, false),
+                _ => unreachable!()
+            }).labelled("function modifiers").boxed()
+    }
+
+    pub fn func_params_parser(cx) -> Vec<Param> => {
+        let ident = ident_parser(cx);
+        let attribs = attribute_parser(cx, false);
+
+        let param =
+            attribs.then(
+                ident
+                .then(
+                    just(Token::Colon)
+                    .ignore_then(expr_parser(cx))
+                    .or_not()
+            )).map_with(|(attributes, (name, default_value)), e| Param {
+                attributes,
+                name,
+                default_value,
+                loc: e.span()
+            });
+
+        param.separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .labelled("function parameters")
+            .boxed()
+    }
+
     pub fn expr_parser(cx) -> NodeId => {
         use chumsky::pratt::{prefix, infix, postfix, left};
+
+        let ident = ident_parser(cx);
+        let mut expr_parser_rec = Recursive::declare();
+        let call_arguments_parser = choice((
+            ident.then_ignore(just(Token::Colon)).then(expr_parser_rec.clone()).map_with(|(name, value), e| ast::Arg {
+                name: Some(name),
+                value,
+                loc: e.span()
+            }),
+            expr_parser_rec.clone().map_with(|value, e| ast::Arg {
+                name: None,
+                value,
+                loc: e.span()
+            })
+        )).separated_by(just(Token::Comma)).collect::<Vec<_>>()
+            .labelled("call argument");
 
         let atom = just(Token::NL).repeated().ignore_then(
             choice((
                 literal_expr_parser(cx),
             )).then_ignore(just(Token::NL).or_not())
-        ).map_with(|atom, e| (atom, e.span()));
+        );
+
+        // TODO: Fix this shit, so that It supports nested calls like hello()()() (maybe use pratt? or write own right-associative parser)
+        let call_expression_parser = atom
+            .clone()
+            .then(call_arguments_parser.delimited_by(just(Token::LeftParen), just(Token::RightParen)))
+            .map_with(|(callee, args), e| cx.add_node(NodeKind::Call { callee, args, tail_closure: None }, e.span()))
+            .labelled("call expression").boxed();
+
+        let atom = call_expression_parser.or(atom)
+            .then_ignore(just(Token::NL).or_not())
+            .map_with(|atom, e| (atom, e.span()));
 
         // Fold with left-associativity
         fn la_fold(cx: ParserContext, op: BinaryOp, l: (NodeId, Loc), r: (NodeId, Loc)) -> (NodeId, Loc) {
@@ -217,7 +324,9 @@ parser_functions! {
             infix(left(1), just(Token::Disjunction), |l, _, r, _| la_fold(cx, BinaryOp::Or, l, r)),
         ));
 
-        pratt_expr.map(|val| val.0).labelled("expression").boxed()
+        let final_parser = pratt_expr.map(|val| val.0).labelled("expression").boxed();
+        expr_parser_rec.define(final_parser);
+        expr_parser_rec
     }
 
     pub fn module_parser(cx) -> NodeId => {

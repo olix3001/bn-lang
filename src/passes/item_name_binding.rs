@@ -1,7 +1,12 @@
 use derive_more::{Deref, DerefMut};
 use rustc_hash::FxHashMap;
 
-use crate::{ast::NodeId, error::CompilationError, passes::*, utils::ComponentStorage};
+use crate::{
+    ast::{self, NodeId},
+    error::CompilationError,
+    passes::*,
+    utils::ComponentStorage,
+};
 
 type NameStack = FxHashMap<String, NodeId>;
 
@@ -86,6 +91,15 @@ impl<'a> Visitor<NameStack> for ItemNameBindingPass<'a> {
     fn visit_let_decl(&mut self, ast: &Ast, attributes: &[Attribute], name: NodeId, value: Option<NodeId>, _node_loc: Loc) -> Self::Result {
         self.bind_current_name(ast, name);
         walk_let_decl(self, ast, attributes, name, value)
+    }
+
+    fn visit_function_def(&mut self, ast: &Ast, func: &Function, _node_loc: Loc) -> Self::Result {
+        match &func.name {
+            ast::ItemName::Identifier(name) => self.bind_current_name(ast, *name),
+            _ => { /* Functions inside structs and objects are not bound. */ }
+        }
+
+        walk_function_def(self, ast, func)
     }
 
     fn visit_export(

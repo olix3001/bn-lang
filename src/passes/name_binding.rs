@@ -3,7 +3,7 @@ use logos::Source;
 use rustc_hash::FxHashMap;
 
 use crate::{
-    ast::NodeId,
+    ast::{self, NodeId},
     error::{CompilationError, CompilerErrorType},
     passes::{item_name_binding::ItemNamespace, *},
     utils::ComponentStorage,
@@ -226,6 +226,34 @@ impl<'a> Visitor<NameStack> for NameBindingPass<'a> {
         self.default_result()
     }
 
+    fn visit_function_def(&mut self, ast: &Ast, func: &Function, node_loc: Loc) -> Self::Result {
+        let ast::ItemName::Identifier(name) = &func.name else {
+            todo!()
+        };
+        println!(
+            "VISITING FUNCTION {} WITH {} PARAMS",
+            ast.ident_name(*name),
+            func.params.len()
+        );
+        self.bind_current_mangled_name(ast, Some(*name), &node_loc);
+        let current_node = self.current_node;
+        let def_value = walk_function_def(self, ast, func)?;
+        self.peek_stack_mut()
+            .insert(ast.ident_name(*name), (current_node, None));
+        Ok(def_value)
+    }
+
+    fn visit_param(&mut self, ast: &Ast, param: &Param) -> Self::Result {
+        let prev_node = std::mem::replace(&mut self.current_node, param.name);
+        self.bind_current_mangled_name(ast, Some(param.name), &param.loc);
+        let current_node = self.current_node;
+        self.peek_stack_mut()
+            .insert(ast.ident_name(param.name), (current_node, None));
+        walk_param(self, ast, param)?;
+        self.current_node = prev_node;
+        self.default_result()
+    }
+
     #[rustfmt::skip]
     fn visit_export(&mut self, ast: &Ast, stmt: NodeId, name: Option<NodeId>, node_loc: Loc) -> Self::Result {
         walk_export(self, ast, stmt, name)?;
@@ -248,14 +276,19 @@ impl<'a> Visitor<NameStack> for NameBindingPass<'a> {
         if segments.len() == 1 {
             // Consider it might be a local variable.
             let segment_name = ast.ident_name(segments[0]);
-            if let Some((ref_id, import_id)) = self.peek_stack().get(&segment_name) {
-                println!("Correctly referenced {ref_id} from {current_node}");
-                self.component_storage.insert(
-                    current_node,
-                    TargetReference::new(import_id.clone(), *ref_id),
-                );
-                return self.default_result();
+            for depth in self.get_stack().iter().rev() {
+                if let Some((ref_id, import_id)) = depth.get(&segment_name) {
+                    println!(
+                        "Correctly referenced {ref_id} from {current_node} ['{segment_name}']",
+                    );
+                    self.component_storage.insert(
+                        current_node,
+                        TargetReference::new(import_id.clone(), *ref_id),
+                    );
+                    return self.default_result();
+                }
             }
+            panic!("Could not find {segment_name} on the stack.");
         }
 
         let (_, last_id, last_module_id) =

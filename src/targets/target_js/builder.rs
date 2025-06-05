@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
 use either::Either;
 use once_cell::sync::Lazy;
@@ -12,8 +12,8 @@ use oxc::{
             FunctionBody, FunctionType, ImportOrExportKind, LogicalOperator, MemberExpression,
             ModuleExportName, NumberBase, ObjectProperty, ObjectPropertyKind, Program, PropertyKey,
             PropertyKind, Statement, TSThisParameter, TSTypeAnnotation, TSTypeParameterDeclaration,
-            TSTypeParameterInstantiation, VariableDeclaration, VariableDeclarationKind,
-            VariableDeclarator, WithClause,
+            TSTypeParameterInstantiation, UnaryOperator, VariableDeclaration,
+            VariableDeclarationKind, VariableDeclarator, WithClause,
         },
     },
     codegen::{Codegen, CodegenOptions},
@@ -24,7 +24,7 @@ use oxc_allocator::Allocator;
 pub(super) static OXC_ALLOCATOR: Lazy<Allocator> = Lazy::new(|| Allocator::new());
 
 // Utilities
-fn binding_ident<'a>(builder: AstBuilder<'a>, name: &str) -> BindingPattern<'a> {
+pub fn binding_ident<'a>(builder: AstBuilder<'a>, name: &str) -> BindingPattern<'a> {
     let atom = builder.atom(name);
     builder.binding_pattern::<Option<TSTypeAnnotation<'a>>>(
         builder.binding_pattern_kind_binding_identifier(Span::default(), atom),
@@ -34,11 +34,11 @@ fn binding_ident<'a>(builder: AstBuilder<'a>, name: &str) -> BindingPattern<'a> 
 }
 
 pub struct ObjectBindingPattern<'a> {
-    pub name: &'a str,
+    pub name: String,
     pub default: Option<Expression<'a>>,
 }
 
-fn binding_assignment<'a>(
+pub fn binding_assignment<'a>(
     builder: AstBuilder<'a>,
     name: &str,
     value: Expression<'a>,
@@ -54,7 +54,7 @@ fn binding_assignment<'a>(
     )
 }
 
-fn binding_object<'a>(
+pub fn binding_object<'a>(
     builder: AstBuilder<'a>,
     fields: impl Iterator<Item = impl Into<ObjectBindingPattern<'a>>>,
     rest: Option<&str>,
@@ -64,13 +64,13 @@ fn binding_object<'a>(
             Span::default(),
             builder.vec_from_iter(fields.map(|f| {
                 let field: ObjectBindingPattern = f.into();
-                let atom = builder.atom(field.name);
+                let atom = builder.atom(&field.name);
                 builder.binding_property(
                     Span::default(),
                     builder.property_key_static_identifier(Span::default(), atom),
                     match field.default {
-                        Some(default) => binding_assignment(builder.clone(), field.name, default),
-                        None => binding_ident(builder.clone(), field.name),
+                        Some(default) => binding_assignment(builder.clone(), &field.name, default),
+                        None => binding_ident(builder.clone(), &field.name),
                     },
                     false,
                     false,
@@ -90,8 +90,18 @@ fn binding_object<'a>(
 
 pub struct JsBuilder<'a> {
     builder: AstBuilder<'a>,
-    pub(super) body: oxc_allocator::Vec<'a, Statement<'a>>,
+    pub(super) body: Rc<RefCell<oxc_allocator::Vec<'a, Statement<'a>>>>,
     phantom: PhantomData<&'a ()>,
+}
+
+impl<'a> Clone for JsBuilder<'a> {
+    fn clone(&self) -> Self {
+        Self {
+            builder: self.builder.clone(),
+            body: Rc::clone(&self.body),
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl<'a> Default for JsBuilder<'a> {
@@ -104,7 +114,7 @@ impl<'a> JsBuilder<'a> {
     pub fn new() -> Self {
         let builder = AstBuilder::new(&OXC_ALLOCATOR);
         Self {
-            body: builder.vec(),
+            body: Rc::new(RefCell::new(builder.vec())),
             builder,
             phantom: PhantomData,
         }
@@ -112,7 +122,7 @@ impl<'a> JsBuilder<'a> {
 
     // Utilities for expressions/statements
     pub fn expr_stmt(&mut self, expr: Expression<'a>) {
-        self.body.push(Statement::ExpressionStatement(
+        self.body.borrow_mut().push(Statement::ExpressionStatement(
             self.builder
                 .alloc_expression_statement(Span::default(), expr),
         ))
@@ -138,7 +148,7 @@ impl<'a> JsBuilder<'a> {
                     None,
                 ),
         );
-        self.body.push(stmt);
+        self.body.borrow_mut().push(stmt);
     }
     pub fn export_declaration(&mut self, declaration: impl Into<Declaration<'a>>) {
         let stmt = Statement::ExportNamedDeclaration(
@@ -152,7 +162,7 @@ impl<'a> JsBuilder<'a> {
                     None,
                 ),
         );
-        self.body.push(stmt);
+        self.body.borrow_mut().push(stmt);
     }
 
     // Variable declarations
@@ -181,19 +191,34 @@ impl<'a> JsBuilder<'a> {
         let stmt: Statement<'a> = self
             .internal_var_decl(VariableDeclarationKind::Const, name.as_ref(), Some(init))
             .into();
-        self.body.push(stmt);
+        self.body.borrow_mut().push(stmt);
     }
     pub fn var_decl(&mut self, name: impl AsRef<str>, init: Option<Expression<'a>>) {
         let stmt: Statement<'a> = self
             .internal_var_decl(VariableDeclarationKind::Var, name.as_ref(), init)
             .into();
-        self.body.push(stmt);
+        self.body.borrow_mut().push(stmt);
     }
     pub fn let_decl(&mut self, name: impl AsRef<str>, init: Option<Expression<'a>>) {
         let stmt: Statement<'a> = self
             .internal_var_decl(VariableDeclarationKind::Let, name.as_ref(), init)
             .into();
-        self.body.push(stmt);
+        self.body.borrow_mut().push(stmt);
+    }
+
+    pub fn return_(&mut self, value: Option<Expression<'a>>) {
+        self.body.borrow_mut().push(Statement::ReturnStatement(
+            self.builder.alloc_return_statement(Span::default(), value),
+        ))
+    }
+
+    pub fn code_block(&mut self, body: JsBuilder<'a>) {
+        self.body.borrow_mut().push(Statement::BlockStatement(
+            self.builder.alloc_block_statement(
+                Span::default(),
+                self.builder.vec_from_iter(body.body.borrow_mut().drain(..)),
+            ),
+        ))
     }
 
     pub fn assignment(
@@ -268,6 +293,12 @@ impl<'a> JsBuilder<'a> {
         ))
     }
 
+    pub fn unary_op(&mut self, op: UnaryOperator, expr: Expression<'a>) -> Expression<'a> {
+        Expression::UnaryExpression(
+            self.builder
+                .alloc_unary_expression(Span::default(), op, expr),
+        )
+    }
     pub fn binary_op(
         &mut self,
         lhs: Expression<'a>,
@@ -352,6 +383,12 @@ impl<'a> JsBuilder<'a> {
         }
     }
 
+    pub fn insert_function(&mut self, function: oxc_allocator::Box<'a, Function<'a>>) {
+        self.body
+            .borrow_mut()
+            .push(Statement::FunctionDeclaration(function.into()))
+    }
+
     // Building
     pub fn build_to_string(self, minify: bool) -> Result<String, anyhow::Error> {
         let mut options = CodegenOptions::default();
@@ -364,7 +401,7 @@ impl<'a> JsBuilder<'a> {
             self.builder.vec(),
             None,
             self.builder.vec(),
-            self.body,
+            self.builder.vec_from_iter(self.body.borrow_mut().drain(..)), // Yes, this could be better but i do not give a f
         );
         let output = codegen.build(&program);
 
@@ -423,9 +460,10 @@ pub struct FunctionBuilder<'a> {
 
 impl<'a> FunctionBuilder<'a> {
     pub fn with_full_body(&mut self, body: JsBuilder<'a>) {
-        self.body = Some(Either::Right(
-            self.builder.block_statement(Span::default(), body.body),
-        ))
+        self.body = Some(Either::Right(self.builder.block_statement(
+            Span::default(),
+            self.builder.vec_from_iter(body.body.borrow_mut().drain(..)),
+        )))
     }
     pub fn with_expr_body(&mut self, expr: Expression<'a>) {
         self.body = Some(Either::Left(expr))
@@ -463,7 +501,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.builder.alloc_function_body(
                     Span::default(),
                     self.builder.vec(),
-                    match self.body.unwrap() {
+                    match self.body.expect("Function builder's .finish() called before inserting body") {
                         Either::Left(expr) => {
                             self.builder.vec_from_array([Statement::ExpressionStatement(
                                 self.builder

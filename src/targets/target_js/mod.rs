@@ -7,11 +7,12 @@ use crate::{
     passes::{
         Visitor,
         name_binding::{MangledName, TargetReference},
-        walk_const_decl, walk_export, walk_import_tree, walk_let_decl, walk_node,
+        walk_block, walk_const_decl, walk_export, walk_function_data, walk_function_def,
+        walk_import_tree, walk_let_decl, walk_node,
     },
     targets::{
         Target,
-        target_js::builder::{JsBuilder, ObjectLiteralBuilder},
+        target_js::builder::{JsBuilder, ObjectBindingPattern, ObjectLiteralBuilder},
     },
     utils::ComponentStorage,
 };
@@ -91,11 +92,17 @@ impl<'a> JsBackend<'a> {
         {
             use oxc::parser::Parser;
             let body = Parser::new(&builder::OXC_ALLOCATOR, BN_RUNTIME, SourceType::cjs()).parse();
-            self.main_builder.body.extend(body.program.body);
+            self.main_builder
+                .body
+                .borrow_mut()
+                .extend(body.program.body);
         }
 
         // Then insert body of top level code.
-        full_body.body.extend(self.main_builder.body);
+        full_body
+            .body
+            .borrow_mut()
+            .extend(self.main_builder.body.borrow_mut().drain(..));
         main_function.with_full_body(full_body);
 
         let main_function = main_function.finish_arrow();
@@ -250,6 +257,93 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
         self.default_result()
     }
 
+    fn visit_function_def(
+        &mut self,
+        ast: &Ast,
+        func: &ast::Function,
+        _node_loc: Loc,
+    ) -> Self::Result {
+        let mangled_name = self.current_mangled_name().to_string();
+
+        let mut binding_object = Vec::new();
+        for param in func.params.iter() {
+            let param_name = self.mangled_name(param.name).to_string();
+            let default = param
+                .default_value
+                .map(|v| {
+                    let ExprOrStmt::Expression(expr) = self.visit_node(ast, v)? else {
+                        unreachable!("Parser should not allow this")
+                    };
+                    Ok(expr)
+                })
+                .transpose()?;
+
+            binding_object.push(ObjectBindingPattern {
+                name: param_name,
+                default,
+            });
+        }
+        let mut builder = self.peek_stack().builder.clone();
+
+        let mut params_builder = builder.start_function_params();
+        params_builder.object_parameter(binding_object.into_iter(), None);
+        let mut fn_builder = builder.start_function(
+            Some(mangled_name),
+            func.is_async,
+            func.is_generator,
+            params_builder.finish(),
+        );
+
+        self.push_stack(JsScope::default());
+        walk_function_def(self, ast, func)?;
+        let body_builder = self.pop_stack().unwrap();
+        println!("body: {:?}", body_builder.builder.body);
+
+        fn_builder.with_full_body(body_builder.builder);
+        builder.insert_function(fn_builder.finish_function(false));
+
+        self.default_result()
+    }
+
+    fn visit_function_data(&mut self, ast: &Ast, func: &ast::Function) -> Self::Result {
+        walk_function_data(self, ast, func, false)
+    }
+
+    fn visit_block(
+        &mut self,
+        ast: &Ast,
+        stmts: &[NodeId],
+        trailing_expr: Option<NodeId>,
+        _node_loc: Loc,
+    ) -> Self::Result {
+        self.push_stack(JsScope::default());
+        walk_block(self, ast, stmts, trailing_expr, false)?;
+        let body = self.pop_stack().unwrap();
+        let builder = &mut self.peek_stack_mut().builder;
+        builder.code_block(body.builder);
+        self.default_result()
+    }
+
+    fn visit_return_stmt(
+        &mut self,
+        ast: &Ast,
+        _attributes: &[ast::Attribute],
+        value: Option<NodeId>,
+        _node_loc: Loc,
+    ) -> Self::Result {
+        let value = value
+            .map(|v| {
+                let ExprOrStmt::Expression(expr) = self.visit_node(ast, v)? else {
+                    todo!()
+                };
+                Ok(expr)
+            })
+            .transpose()?;
+        let builder = &mut self.peek_stack_mut().builder;
+        builder.return_(value);
+        self.default_result()
+    }
+
     fn visit_number_lit(&mut self, _ast: &Ast, value: &String, _node_loc: Loc) -> Self::Result {
         let builder = &mut self.peek_stack_mut().builder;
         let number_expr = builder.number_literal(value.parse().unwrap()); // TODO: Better number parsing.
@@ -287,6 +381,30 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
         self.default_result()
     }
 
+    fn visit_unary_op(
+        &mut self,
+        ast: &Ast,
+        op: ast::UnaryOp,
+        operand: NodeId,
+        _node_loc: Loc,
+    ) -> Self::Result {
+        let ExprOrStmt::Expression(expr) = self.visit_node(ast, operand)? else {
+            todo!()
+        };
+
+        let builder = &mut self.peek_stack_mut().builder;
+
+        use oxc::ast::ast::UnaryOperator;
+        Ok(ExprOrStmt::Expression(builder.unary_op(
+            match op {
+                ast::UnaryOp::Neg => UnaryOperator::UnaryNegation,
+                ast::UnaryOp::Not => UnaryOperator::LogicalNot,
+                _ => todo!("Figure out how to compile increment/decrement operators"),
+            },
+            expr,
+        )))
+    }
+
     fn visit_binary_op(
         &mut self,
         ast: &Ast,
@@ -295,10 +413,10 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
         right: NodeId,
         _node_loc: Loc,
     ) -> Self::Result {
-        let ExprOrStmt::Expression(lhs) = walk_node(self, ast, left)? else {
+        let ExprOrStmt::Expression(lhs) = self.visit_node(ast, left)? else {
             todo!()
         };
-        let ExprOrStmt::Expression(rhs) = walk_node(self, ast, right)? else {
+        let ExprOrStmt::Expression(rhs) = self.visit_node(ast, right)? else {
             todo!()
         };
 
@@ -351,6 +469,14 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
 
     fn visit_path(&mut self, ast: &Ast, segments: &[NodeId], _node_loc: Loc) -> Self::Result {
         let current_node = self.current_node;
+        println!(
+            "Looking for reference on path {} ({current_node})",
+            segments
+                .iter()
+                .map(|seg| ast.ident_name(*seg))
+                .collect::<Vec<_>>()
+                .join("::")
+        );
         let target_ref = self
             .component_storage
             .fetch::<TargetReference>(current_node)

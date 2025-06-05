@@ -175,7 +175,7 @@ where
         trailing_expr: Option<NodeId>,
         _node_loc: Loc,
     ) -> Self::Result {
-        walk_block(self, ast, stmts, trailing_expr)
+        walk_block(self, ast, stmts, trailing_expr, true)
     }
     fn visit_export(
         &mut self,
@@ -335,7 +335,7 @@ where
         walk_module_data(self, ast, module)
     }
     fn visit_function_data(&mut self, ast: &Ast, func: &Function) -> Self::Result {
-        walk_function_data(self, ast, func)
+        walk_function_data(self, ast, func, true)
     }
     fn visit_struct_data(&mut self, ast: &Ast, structure: &Struct) -> Self::Result {
         walk_struct_data(self, ast, structure)
@@ -608,11 +608,16 @@ pub fn walk_block<V: Visitor<S, Result = R>, S: Default, R: Try>(
     ast: &Ast,
     stmts: &[NodeId],
     trailing_expr: Option<NodeId>,
+    push_stack: bool,
 ) -> R {
-    visitor.push_stack(S::default());
+    if push_stack {
+        visitor.push_stack(S::default());
+    }
     visit_vec_node_id!(visitor, ast, stmts);
     let trailing = visit_opt_node_id!(visitor, ast, trailing_expr);
-    visitor.pop_stack();
+    if push_stack {
+        visitor.pop_stack();
+    }
     if let Some(trailing) = trailing {
         trailing
     } else {
@@ -841,11 +846,18 @@ pub fn walk_function_data<V: Visitor<S, Result = R>, S: Default, R: Try>(
     visitor: &mut V,
     ast: &Ast,
     func: &Function,
+    push_stack: bool,
 ) -> R {
     visit_vec_items!(visitor, ast, &func.attributes, visit_attribute);
     visitor.visit_item_name(ast, &func.name);
+    if push_stack {
+        visitor.push_stack(S::default());
+    }
     visit_vec_items!(visitor, ast, &func.params, visit_param);
     visitor.visit_node(ast, func.body)?;
+    if push_stack {
+        visitor.pop_stack();
+    }
     visitor.default_result()
 }
 

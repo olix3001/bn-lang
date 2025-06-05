@@ -29,17 +29,22 @@ fn main() {
     const EXAMPLE_SOURCE: &'static str = "
     // These names are only here because i have already used lipsum, and this works great instead :D
     module sigma {
-        export const rizz = 1;
+        export const rizz = 1
         module skibidi {
             import super::rizz;
-            export const custom_value = rizz;
+            export const custom_value = rizz
         }
     }
 
-    const hello = 1;
-    let world = 2 - 2 * 2 == 8 || 4 < 5;
-    let lorem = hello;
-    let bruh = sigma::skibidi::custom_value;
+    fn add(a, b: 1) => a + b
+    fn sub(a, b: 1) {
+        return a - b
+    }
+
+    const hello = 1
+    let world = 2 - 2 * 2 == 8 || 4 < 5
+    let lorem = hello
+    let bruh = sigma::skibidi::custom_value
     ";
 
     let token_iter = Token::lexer(EXAMPLE_SOURCE)

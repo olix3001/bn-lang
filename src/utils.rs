@@ -4,7 +4,7 @@ use colored::Colorize;
 use rustc_hash::FxHashMap;
 use slotmap::{SecondaryMap, SlotMap};
 
-use crate::ast::{Ast, ImportGroupItem, ImportTree, ImportTreeKind, NodeId, NodeKind};
+use crate::ast::{Ast, ImportGroupItem, ImportTree, ImportTreeKind, ItemName, NodeId, NodeKind};
 
 slotmap::new_key_type! {
     struct ComponentId;
@@ -106,6 +106,58 @@ pub fn pretty_print_ast(ast: &Ast, root: NodeId, ind: usize) {
                 ast.get_ident_name(*name).unwrap_or("<self>").cyan()
             );
             pretty_print_ast(ast, *stmt, ind + 1);
+        }
+
+        NodeKind::ReturnStmt { value, .. } => match value {
+            Some(value) => println!(
+                "{indent}{} {}",
+                "return".yellow(),
+                pretty_print_expr(ast, *value)
+            ),
+            None => println!("{indent}{} {}", "return".yellow(), "void".bright_purple()),
+        },
+
+        NodeKind::Block {
+            stmts,
+            trailing_expr,
+        } => {
+            println!("{indent}{} {{", "block".yellow());
+            for stmt in stmts.iter() {
+                pretty_print_ast(ast, *stmt, ind + 1);
+            }
+            if let Some(trailing) = trailing_expr {
+                println!(
+                    "{}{}: {}",
+                    " ".repeat((ind + 1) * 4),
+                    "trailing".yellow(),
+                    pretty_print_expr(ast, *trailing)
+                );
+            }
+            println!("{indent}}}");
+        }
+
+        NodeKind::FunctionDef(def) => {
+            let name = match &def.name {
+                ItemName::Identifier(name) => ast.ident_name(*name).cyan(),
+                _ => "<todo:computed>".red(),
+            };
+            let params = def
+                .params
+                .iter()
+                .map(|param| match &param.default_value {
+                    Some(default_value) => format!(
+                        "{}: {}",
+                        ast.ident_name(param.name).cyan(),
+                        pretty_print_expr(ast, *default_value)
+                    )
+                    .to_string(),
+                    None => ast.ident_name(param.name).cyan().to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            println!("{indent}{} {}({}):", "function".yellow(), name, params);
+            pretty_print_ast(ast, def.body, ind + 1);
         }
 
         NodeKind::ConstDecl { name, value, .. } => {
