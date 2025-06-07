@@ -36,11 +36,11 @@ fn main() {
     }
 
     module utils {
-      export const GREET_PREFIX = "Hello, ";
-      export const GREET_SUFFIX = "!";
+      const GREET_PREFIX = "Hello, ";
+      const GREET_SUFFIX = "!";
       // Standard methods with fn name() { } are supported too!
       // But this is a shorthand for fn name() { return expr; }
-      export fn combine(text, prefix, suffix) => prefix + text + suffix
+      export fn combine(text, prefix: GREET_PREFIX, suffix: GREET_SUFFIX) => prefix + text + suffix
     }
 
     // Some examples:
@@ -49,8 +49,7 @@ fn main() {
 
     console.log(utils::combine(
       "User",
-      prefix: utils::GREET_PREFIX,
-      suffix: utils::GREET_SUFFIX,
+      suffix: "!!!"
     ));
     "#;
 
