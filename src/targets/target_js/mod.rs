@@ -1,4 +1,5 @@
 use oxc::span::SourceType;
+use rustc_hash::FxHashSet;
 
 use crate::{
     ast::{self, Ast, BinaryOp, NodeId, NodeKind},
@@ -46,6 +47,7 @@ const BN_RUNTIME: &'static str = include_str!("./runtime.js");
 #[derive(Default)]
 struct JsScope<'a> {
     builder: JsBuilder<'a>,
+    imported_namespaces: FxHashSet<String>,
 }
 
 struct JsBackend<'a> {
@@ -188,12 +190,15 @@ impl<'a> Visitor<JsScope<'a>> for JsBackend<'a> {
                 .unwrap();
             let target_module_name = self.mangled_name(target_ref.module.unwrap()).to_string();
 
-            let builder = &mut self.peek_stack_mut().builder;
-            let bn_require = builder.variable_literal("__bn_require__");
-            let target_import_name = builder.string_literal(&target_module_name);
-            let import_stmt = builder.call(bn_require, [target_import_name].into_iter(), false);
+            let stack = self.peek_stack_mut();
+            if (!stack.imported_namespaces.insert(target_module_name.clone())) {
+                let builder = &mut stack.builder;
+                let bn_require = builder.variable_literal("__bn_require__");
+                let target_import_name = builder.string_literal(&target_module_name);
+                let import_stmt = builder.call(bn_require, [target_import_name].into_iter(), false);
 
-            builder.const_decl(imported_name, import_stmt);
+                builder.const_decl(imported_name, import_stmt);
+            }
         }
         walk_import_tree(self, ast, tree)
     }

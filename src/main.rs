@@ -1,4 +1,3 @@
-#![feature(type_alias_impl_trait)]
 #![feature(try_trait_v2)]
 
 use crate::{
@@ -26,28 +25,34 @@ pub(crate) mod passes;
 pub(crate) mod targets;
 
 fn main() {
-    const EXAMPLE_SOURCE: &'static str = "
-    // These names are only here because i have already used lipsum, and this works great instead :D
-    module sigma {
-        export const rizz = 1
-        module skibidi {
-            import super::rizz;
-            export const custom_value = rizz
-        }
-    }
-
-    fn add(a, b: 1) => a + b
-    fn sub(a, b: 1) {
-        return a - b
-    }
-
-    const hello = add(1, b: 4);
-    let world = 2 - 2 * 2 == 8 || 4 < 5
-    let lorem = hello
-    let bruh = sigma::skibidi::custom_value;
+    const EXAMPLE_SOURCE: &'static str = r#"
+    // This tells the compiler to just assume that
+    // variable 'console' exists globally.
     #[external] const console;
-    console.log(sub(a: lorem, b: bruh));
-    ";
+
+    module math {
+      export fn add(a, b) => a + b
+      export fn sub(a, b) => a - b
+    }
+
+    module utils {
+      export const GREET_PREFIX = "Hello, ";
+      export const GREET_SUFFIX = "!";
+      // Standard methods with fn name() { } are supported too!
+      // But this is a shorthand for fn name() { return expr; }
+      export fn combine(text, prefix, suffix) => prefix + text + suffix
+    }
+
+    // Some examples:
+    import math::{add, sub};
+    let a = add(sub(3, 1), 2); // a = 4
+
+    console.log(utils::combine(
+      "User",
+      prefix: utils::GREET_PREFIX,
+      suffix: utils::GREET_SUFFIX,
+    ));
+    "#;
 
     let token_iter = Token::lexer(EXAMPLE_SOURCE)
         .spanned()

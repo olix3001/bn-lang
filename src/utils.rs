@@ -201,6 +201,8 @@ fn pretty_print_expr(ast: &Ast, expr: NodeId) -> String {
 
     match &cnode.kind {
         NodeKind::NumberLit(value) => value.bright_green().to_string(),
+        NodeKind::BooleanLit(value) => value.to_string().bright_green().to_string(),
+        NodeKind::StringLit(value) => format!("{value:?}").bright_green().to_string(),
         NodeKind::Path { segments } => pretty_path(ast, segments),
 
         NodeKind::BinaryOp { op, left, right } => {

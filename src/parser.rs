@@ -258,7 +258,8 @@ parser_functions! {
                 value,
                 loc: e.span()
             })
-        )).separated_by(just(Token::Comma)).collect::<Vec<_>>()
+        )).separated_by(just(Token::Comma).then(just(Token::NL).or_not()))
+        .allow_trailing().collect::<Vec<_>>()
             .labelled("call argument");
 
         let atom = just(Token::NL).repeated().ignore_then(
@@ -285,7 +286,7 @@ parser_functions! {
         }
 
         let call_operator = call_arguments_parser
-            .delimited_by(just(Token::LeftParen), just(Token::RightParen))
+            .delimited_by(just(Token::LeftParen).then(just(Token::NL).or_not()), just(Token::RightParen))
             .boxed();
 
         let static_member_access = just(Token::Dot).ignore_then(ident);
